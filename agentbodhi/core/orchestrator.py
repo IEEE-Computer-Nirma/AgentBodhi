@@ -35,7 +35,7 @@ class ResearchOrchestrator:
 
     def __init__(self, gemini_key: str, tavily_key: str):
         self.client = genai.Client(api_key=gemini_key)
-        self.model = "gemma-3-27b-it"#"gemini-3.1-flash-lite-preview" #"gemini-2.5-flash-lite"
+        self.model = "gemini-3.1-flash-lite-preview" #"gemini-2.5-flash-lite" "gemma-3-27b-it"#
         self.tavily = TavilyClient(api_key=tavily_key)
 
         self.citation_agent = CitationAgent(self.client, self.model)
