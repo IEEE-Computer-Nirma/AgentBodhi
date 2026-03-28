@@ -1,6 +1,5 @@
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 import arxiv
@@ -42,15 +41,10 @@ Return ONLY the JSON array, no explanation."""
             citations_data = json.loads(json_text)
 
             citations = []
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                future_to_citation = {
-                    executor.submit(self._verify_citation, cit): cit
-                    for cit in citations_data
-                }
-                for future in as_completed(future_to_citation):
-                    citation = future.result()
-                    if citation:
-                        citations.append(citation)
+            for cit in citations_data:
+                citation = self._verify_citation(cit)
+                if citation:
+                    citations.append(citation)
 
             self._set_cache(cache_key, citations)
             return citations
@@ -66,7 +60,7 @@ Return ONLY the JSON array, no explanation."""
 
             search = arxiv.Search(query=f'ti:"{title}"', max_results=1,
                                   sort_by=arxiv.SortCriterion.Relevance)
-            client = arxiv.Client()
+            client = arxiv.Client(page_size=1, delay_seconds=3, num_retries=5)
             results = list(client.results(search))
 
             if results:
