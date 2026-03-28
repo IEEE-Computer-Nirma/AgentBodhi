@@ -25,9 +25,10 @@ class RelatedWorkAgent(ResearchAgent):
                 max_results=num_papers,
                 sort_by=arxiv.SortCriterion.Relevance
             )
+            client = arxiv.Client(page_size=10, delay_seconds=3, num_retries=5)
 
             related = []
-            for paper in search.results():
+            for paper in client.results(search):
                 related.append({
                     'title': paper.title,
                     'url': paper.entry_id,

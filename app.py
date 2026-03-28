@@ -3,6 +3,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from typing import List
+import io
+import uuid
 
 from agentbodhi.configuration import ConfigManager
 from agentbodhi.core.orchestrator import ResearchOrchestrator
@@ -23,6 +25,7 @@ except Exception as e:
 class ChatRequest(BaseModel):
     message: str
     agents: List[str]
+    session_id: str
 
 @app.get("/")
 def read_root():
@@ -50,8 +53,9 @@ async def upload_paper(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Backend orchestrator is not configured with valid keys.")
     
     try:
-        orchestrator.load_pdf_context(content)
-        return JSONResponse(content={"status": "success", "filename": file.filename})
+        session_id = str(uuid.uuid4())
+        orchestrator.load_pdf_context(content, session_id)
+        return JSONResponse(content={"status": "success", "filename": file.filename, "session_id": session_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
 
@@ -61,12 +65,38 @@ async def chat_with_agents(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Please select at least one agent.")
     if not orchestrator:
         raise HTTPException(status_code=500, detail="Backend orchestrator is not configured with valid keys.")
+    if not request.session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id.")
     
     try:
-        results = orchestrator.chat_with_agents(request.agents, request.message)
+        results = orchestrator.chat_with_agents(request.session_id, request.agents, request.message)
         return JSONResponse(content={"responses": results})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/analyze")
+async def analyze_full_paper(file: UploadFile = File(...)):
+    if not file.filename.endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDFs are supported.")
+    
+    content = await file.read()
+    if not orchestrator:
+        raise HTTPException(status_code=500, detail="Backend orchestrator is not configured with valid keys.")
+    
+    try:
+        # We need a file-like object for orchestrator.analyze_paper
+        import io
+        import dataclasses
+        pdf_file = io.BytesIO(content)
+        session_id = str(uuid.uuid4())
+        report = orchestrator.analyze_paper(pdf_file, session_id)
+        
+        # Serialize report (it's a dataclass model)
+        response_data = dataclasses.asdict(report)
+        response_data["session_id"] = session_id
+        return JSONResponse(content=response_data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to analyze PDF: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

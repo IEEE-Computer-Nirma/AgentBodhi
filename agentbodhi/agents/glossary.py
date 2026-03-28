@@ -31,8 +31,19 @@ Return ONLY the JSON object."""
                 model=self.model,
                 contents=prompt
             )
-            return json.loads(self._extract_json(response.text))
+            terms = json.loads(self._extract_json(response.text))
+
+            # Cross-reference terms with external web definitions if tavily is available
+            if self.tavily:
+                for term, info in terms.items():
+                    try:
+                        web_result = self.tavily.search(f"{term} definition in computer science or domain", max_results=1)
+                        if web_result.get('results'):
+                            info['web_context'] = web_result['results'][0].get('content', '')
+                    except Exception as e:
+                        logger.error(f"Tavily search error for glossary term {term}: {e}")
+
+            return terms
         except Exception as e:
             logger.error(f"Glossary generation error: {e}")
             return {}
-

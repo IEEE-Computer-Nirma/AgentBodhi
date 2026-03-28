@@ -11,17 +11,22 @@ logger = logging.getLogger(__name__)
 class MethodologyAgent(ResearchAgent):
     def execute(self, paper_content: str) -> List[Weakness]:
         try:
+            # First attempt to extract just the methodology/experiments section for tighter focus
+            extraction_prompt = "Extract the 'Methodology', 'Experimental Setup', and 'Datasets' sections from this text. If none explicitly exist, extract the middle 4000 words. \n\n" + paper_content[:20000]
+            extraction_resp = self.client.models.generate_content(model=self.model, contents=extraction_prompt)
+            methodology_text = extraction_resp.text
+
             base_prompt = """You are an expert peer reviewer. Analyze this research paper's methodology.
 Identify specific weaknesses in these categories:
 1. Experimental Design (sample size, controls, bias)
 2. Statistical Methods (validity, assumptions, p-hacking risks)
-3. Reproducibility (missing details, dependencies)
+3. Reproducibility (missing code/repo links, private datasets, missing hyperparameter details)
 4. Generalizability (limited scope, overfitting)
 5. Ethical Considerations (data privacy, fairness)
 
 For each weakness found, provide:
 - Category
-- Specific description
+- Specific description (e.g. "The paper claims to use an open dataset but provides no URL or accession number")
 - Severity (Critical/Major/Minor)
 - Constructive suggestion for improvement
 
@@ -38,8 +43,8 @@ Return as JSON array:
 
             prompt = (
                 base_prompt
-                + "\nPaper content:\n"
-                + paper_content[:12000]
+                + "\nExtracted Methodology context:\n"
+                + methodology_text[:12000]
                 + "\n\nReturn ONLY the JSON array."
             )
 

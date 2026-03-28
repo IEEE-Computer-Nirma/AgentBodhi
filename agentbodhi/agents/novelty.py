@@ -20,7 +20,8 @@ class NoveltyAgent(ResearchAgent):
                     max_results=3,
                     sort_by=arxiv.SortCriterion.Relevance
                 )
-                arxiv_results = [{"title": p.title, "summary": p.summary[:200]} for p in search.results()]
+                client = arxiv.Client(page_size=10, delay_seconds=3, num_retries=5)
+                arxiv_results = [{"title": p.title, "summary": p.summary[:200]} for p in client.results(search)]
             except Exception:
                 pass
 

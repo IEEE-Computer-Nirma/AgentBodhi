@@ -39,9 +39,15 @@ Return ONLY the JSON."""
                     max_results=3,
                     sort_by=arxiv.SortCriterion.SubmittedDate
                 )
+                client = arxiv.Client(page_size=10, delay_seconds=3, num_retries=5)
                 arxiv_results = [
-                    {"title": p.title, "url": p.entry_id, "year": p.published.year}
-                    for p in search.results()
+                    {
+                        "title": p.title, 
+                        "url": p.entry_id, 
+                        "year": p.published.year,
+                        "abstract": p.summary[:500]
+                    }
+                    for p in client.results(search)
                 ]
             except Exception as e:
                 logger.error(f"Arxiv search error: {e}")
@@ -97,4 +103,3 @@ Return ONLY the JSON."""
         except Exception as e:
             logger.error(f"SOTA analysis error: {e}")
             return {'error': str(e)}
-

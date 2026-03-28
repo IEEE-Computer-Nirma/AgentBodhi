@@ -20,6 +20,7 @@ from ..agents.methodology import MethodologyAgent
 from ..agents.novelty import NoveltyAgent
 from ..agents.related_work import RelatedWorkAgent
 from ..agents.sota import SOTAAgent
+from ..agents.conference import ConferenceAgent
 from .models import AnalysisReport, Insight
 from .utils import extract_json
 
@@ -41,21 +42,23 @@ class ResearchOrchestrator:
 
     def __init__(self, gemini_key: str, tavily_key: str):
         self.client = genai.Client(api_key=gemini_key)
-        self.model =  "gemma-3-27b-it"#"gemini-3-flash-preview"#gemini-3.1-flash-lite-preview" #"gemini-2.5-flash-lite"
+        self.model = "gemma-3-27b-it"#"gemini-3-flash-preview"#gemini-3.1-flash-lite-preview" #"gemini-2.5-flash-lite"
         self.tavily = TavilyClient(api_key=tavily_key)
-
+        
         self.citation_agent = CitationAgent(self.client, self.model)
         self.methodology_agent = MethodologyAgent(self.client, self.model)
         self.sota_agent = SOTAAgent(self.client, self.model, self.tavily)
         self.novelty_agent = NoveltyAgent(self.client, self.model, self.tavily)
-        self.glossary_agent = GlossaryAgent(self.client, self.model)
+        self.glossary_agent = GlossaryAgent(self.client, self.model, self.tavily)
         self.related_work_agent = RelatedWorkAgent(self.client, self.model, self.tavily)
+        self.conference_agent = ConferenceAgent(self.client, self.model, self.tavily)
 
-        self._context = {}
+        self._contexts = {}
 
     def analyze_paper(
         self,
         pdf_file,
+        session_id: str,
         progress_callback: Optional[ProgressCallback] = None,
         max_citations: int = 10,
         glossary_terms: int = 12,
@@ -91,7 +94,7 @@ class ResearchOrchestrator:
             progress_callback("Running specialized agents (Hybrid Search)...", 0.3)
 
         results: Dict[str, object] = {}
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = {
                 "citations": executor.submit(self.citation_agent.execute, paper_text, max_citations),
                 "weaknesses": executor.submit(self.methodology_agent.execute, paper_text),
@@ -141,6 +144,13 @@ class ResearchOrchestrator:
 
         if progress_callback:
             progress_callback("Analysis complete!", 1.0)
+            
+        # Also store the context so the chat interface can be used right after
+        self._contexts[session_id] = {
+            "summary": paper_summary,
+            "full_text": paper_text,
+            "pdf_bytes": pdf_bytes
+        }
 
         return report
 
@@ -220,10 +230,10 @@ Return ONLY the JSON."""
 
         return insights
 
-    def get_context_snapshot(self) -> Dict[str, object]:
-        return dict(self._context)
+    def get_context_snapshot(self, session_id: str) -> Dict[str, object]:
+        return dict(self._contexts.get(session_id, {}))
 
-    def load_pdf_context(self, pdf_bytes: bytes) -> None:
+    def load_pdf_context(self, pdf_bytes: bytes, session_id: str) -> None:
         """Loads a PDF and extracts text/summary without running the full analysis pipeline."""
         summary_resp = self.client.models.generate_content(
             model=self.model,
@@ -241,16 +251,16 @@ Return ONLY the JSON."""
             ]
         )
 
-        self._context = {
+        self._contexts[session_id] = {
             "summary": summary_resp.text,
             "full_text": full_text_resp.text,
             "pdf_bytes": pdf_bytes
         }
 
-    def chat_with_agents(self, agent_slugs: List[str], instruction: str) -> Dict[str, str]:
-        context = self.get_context_snapshot()
+    def chat_with_agents(self, session_id: str, agent_slugs: List[str], instruction: str) -> Dict[str, str]:
+        context = self.get_context_snapshot(session_id)
         if not context.get("full_text"):
-            raise ValueError("No paper context available. Upload a PDF first.")
+            raise ValueError("No paper context available for this session. Upload a PDF first.")
 
         selected_roles = [self.CHAT_AGENT_GUIDANCE.get(s, "") for s in agent_slugs]
         
@@ -260,8 +270,9 @@ You need to fulfill this user instruction: "{instruction}"
 Relevant Paper Summary: {context['summary'][:1000]}
 You have the following expert roles available: {agent_slugs}
 
-Decide on 1 to 3 search queries needed to gather external information (like conference CFPs, or glossary definitions, or related papers) before writing the final response. 
-If no search is needed, return an empty list for queries.
+Decide on 1 to 3 search queries needed to gather external information required to fulfill the user instruction.
+Do not search for things that the dedicated sub-agents would check (e.g. SOTA, conferences).
+If no general search is needed, return an empty list for queries.
 
 Return ONLY valid JSON in this format:
 {{
@@ -282,7 +293,41 @@ Return ONLY valid JSON in this format:
         for step in plan_json.get("plan_steps", []):
             logs.append(f"  - {step}")
 
-        # Step 2: Execute Search tools (Selenium/DuckDuckGo)
+        # Step 2: Delegate to specialized AI Agents
+        logs.append("⚙️ **Agent Action:** Delegating to invoked sub-agents...")
+        agent_results = {}
+        paper_text = str(context["full_text"])
+        paper_summary = str(context["summary"])
+        
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future_to_agent = {}
+            if "citations" in agent_slugs:
+                future_to_agent[executor.submit(self.citation_agent.execute, paper_text, 10)] = "Citations"
+            if "methodology" in agent_slugs:
+                future_to_agent[executor.submit(self.methodology_agent.execute, paper_text)] = "Methodology"
+            if "sota" in agent_slugs:
+                future_to_agent[executor.submit(self.sota_agent.execute, paper_summary, paper_text[:5000])] = "SOTA"
+            if "novelty" in agent_slugs:
+                future_to_agent[executor.submit(self.novelty_agent.execute, paper_summary, paper_text[:8000])] = "Novelty"
+            if "glossary" in agent_slugs:
+                future_to_agent[executor.submit(self.glossary_agent.execute, paper_text, 10)] = "Glossary"
+            if "related" in agent_slugs:
+                future_to_agent[executor.submit(self.related_work_agent.execute, paper_summary, 5)] = "Related Work"
+            if "conference" in agent_slugs:
+                future_to_agent[executor.submit(self.conference_agent.execute, paper_summary)] = "Conference Matchmaker"
+
+            for future in as_completed(future_to_agent):
+                agent_name = future_to_agent[future]
+                try:
+                    result = future.result(timeout=60)
+                    agent_results[agent_name] = result
+                    logs.append(f"✅ **{agent_name} Agent**: Execution completed successfully.")
+                except Exception as exc:
+                    logger.error("Agent %s failed: %s", agent_name, exc)
+                    agent_results[agent_name] = {"error": str(exc)}
+                    logs.append(f"❌ **{agent_name} Agent**: Execution failed.")
+
+        # Step 3: Execute Search tools (Selenium/DuckDuckGo)
         search_results = ""
         for query in plan_json.get("search_queries", []):
             logs.append(f"🌐 **Agent Action:** Searching Web via Selenium for: `{query}`...")
@@ -290,9 +335,19 @@ Return ONLY valid JSON in this format:
             search_results += f"Search Query: {query}\nResults:\n{res}\n\n"
             logs.append(f"✅ **Agent Action:** Retrieved search results for `{query}`")
 
-        logs.append("🧠 **Agent Action:** Synthesizing final unified collaborative report...")
+        logs.append("🧠 **Agent Action:** Synthesizing final unified collaborative report grounded in agent data...")
 
-        # Step 3: Final Synthesis
+        # Convert agent results to JSON text
+        def serialize_results(obj):
+            if hasattr(obj, "model_dump"):
+                return obj.model_dump()
+            elif hasattr(obj, "__dict__"):
+                return obj.__dict__
+            return str(obj)
+
+        agent_results_json = json.dumps(agent_results, indent=2, default=serialize_results)
+
+        # Step 4: Final Synthesis
         synthesis_prompt = f"""You are the unified Master Agent synthesizing a response based on multiple expert perspectives.
 You are embodying these roles: {selected_roles}
 
@@ -301,20 +356,24 @@ User Instruction: {instruction}
 Paper Summary:
 {context['summary']}
 
-Web Search Results:
+--- The Core Sub-Agent Findings (crucial strictly-gathered domain facts) ---
+{agent_results_json}
+
+--- External Web Search Results (general context) ---
 {search_results if search_results else "No external search was performed."}
 
-Synthesize a single, highly cohesive, comprehensive response. Do not separate by agent. Write one unified professional report. Markdown format.
+Synthesize a single, highly cohesive, comprehensive response combining the requested sub-agent data and factual findings directly into the report. Ground the answer on the concrete findings, citing papers, metrics, or glossary terms discovered. 
+Do not separate arbitrarily by agent name, write one unified professional report addressing everything requested by the user, but heavily incorporate the sub-agent data naturally. Markdown format.
 """
         final_resp = self.client.models.generate_content(model=self.model, contents=synthesis_prompt).text.strip()
         
         formatted_logs = "\n".join(logs)
         return {"Synthesized Report": f"{formatted_logs}\n\n---\n\n{final_resp}"}
 
-    def chat_with_agent(self, agent_slug: str, instruction: str, usage_hint: str) -> str:
-        context = self.get_context_snapshot()
+    def chat_with_agent(self, session_id: str, agent_slug: str, instruction: str, usage_hint: str) -> str:
+        context = self.get_context_snapshot(session_id)
         if not context.get("full_text"):
-            raise ValueError("No paper context available. Upload a PDF first.")
+            raise ValueError("No paper context available for this session. Upload a PDF first.")
 
         primer = self.CHAT_AGENT_GUIDANCE.get(agent_slug, "You are a helpful research agent.")
         prompt = f"{primer}\n\nPaper summary:\n{context['summary']}\n\nRelevant paper excerpt:\n{str(context['full_text'])[:8000]}\n\nResearcher instruction:\n{instruction}\n\n{usage_hint}\n\nRespond in Markdown."
@@ -337,7 +396,6 @@ Synthesize a single, highly cohesive, comprehensive response. Do not separate by
             url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
             driver.get(url)
             html = driver.page_source
-            driver.quit()
             
             soup = BeautifulSoup(html, 'html.parser')
             results = []
@@ -350,3 +408,9 @@ Synthesize a single, highly cohesive, comprehensive response. Do not separate by
             return "\n".join([f"- {r}" for r in results])
         except Exception as e:
             return f"Search error: {str(e)}"
+        finally:
+            if 'driver' in locals():
+                try:
+                    driver.quit()
+                except Exception:
+                    pass

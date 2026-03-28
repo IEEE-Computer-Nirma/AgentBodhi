@@ -84,6 +84,36 @@
     }
     .upload-btn svg { width: 18px; height: 18px; color: var(--text-muted); }
     #file-input { display: none; }
+    .upload-notification {
+        margin-bottom: 0.75rem;
+        padding: 0.65rem 1.5rem 0.65rem 0.9rem;
+        border-radius: 0.7rem;
+        border: 1px solid #c7d2fe;
+        background: #eef2ff;
+        color: #312e81;
+        font-size: 0.85rem;
+        line-height: 1.4;
+        display: none;
+        word-wrap: break-word;
+        word-break: break-word;
+        position: relative;
+    }
+    .close-notif {
+        position: absolute;
+        top: 0.35rem;
+        right: 0.4rem;
+        background: none;
+        border: none;
+        font-size: 1.1rem;
+        cursor: pointer;
+        color: #312e81;
+        opacity: 0.6;
+        line-height: 1;
+        padding: 0;
+    }
+    .close-notif:hover {
+        opacity: 1;
+    }
 
     .agents-header {
         font-size: 0.75rem;
@@ -350,6 +380,14 @@
         Upload Paper Context
     </button>
     <input type="file" id="file-input" accept="application/pdf">
+    <div id="upload-notification" class="upload-notification"></div>
+
+    <button class="upload-btn" id="analyze-btn" style="display: none;" onclick="runFullAnalysis()">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
+        </svg>
+        Run Full Analytics Dashboard
+    </button>
 
     <div class="agents-header">Specialist Agents</div>
     <div class="agents-list" id="agents-list">
@@ -382,6 +420,7 @@
 
 <script>
     let isPaperLoaded = false;
+    let currentSessionId = null;
     let agentsData = [];
 
     const agentsListEl = document.getElementById('agents-list');
@@ -389,6 +428,8 @@
     const chatInputEl = document.getElementById('chat-input');
     const sendBtnEl = document.getElementById('send-btn');
     const fileInputEl = document.getElementById('file-input');
+    const analyzeBtnEl = document.getElementById('analyze-btn');
+    const uploadNotifEl = document.getElementById('upload-notification');
     const emptyStateEl = document.getElementById('empty-state');
     const chatContainerEl = document.getElementById('chat-container');
 
@@ -490,10 +531,12 @@
 
             if (res.ok) {
                 isPaperLoaded = true;
+                currentSessionId = data.session_id;
+                analyzeBtnEl.style.display = 'flex'; // show analyze button
                 chatInputEl.disabled = false;
                 chatInputEl.placeholder = "Message your agents...";
                 chatInputEl.focus();
-                appendMessage('system', `Ready! The context from <strong>${file.name}</strong> has been loaded. Select your agents below and ask a question.`);
+                showUploadNotification(`Ready! The context from <strong>${file.name}</strong> has been loaded. Select your agents below and ask a question. Or generate a full analytics dashboard using the side menu.`);
             } else {
                 appendMessage('system', `Error: ${data.detail || 'Upload failed'}`);
             }
@@ -505,7 +548,7 @@
 
     async function sendMessage() {
         const text = chatInputEl.value.trim();
-        if (!text || !isPaperLoaded) return;
+        if (!text || !isPaperLoaded || !currentSessionId) return;
 
         // Get selected agents
         const checkboxes = agentsListEl.querySelectorAll('input[type="checkbox"]:checked');
@@ -531,7 +574,8 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: text,
-                    agents: selectedSlugs
+                    agents: selectedSlugs,
+                    session_id: currentSessionId
                 })
             });
 
@@ -564,6 +608,79 @@
             if(!sendBtnEl.disabled) sendMessage();
         }
     });
+
+    async function runFullAnalysis() {
+        if (!fileInputEl.files[0]) return;
+
+        chatInputEl.disabled = true;
+        sendBtnEl.disabled = true;
+        analyzeBtnEl.disabled = true;
+
+        const loadingMsg = appendMessage('system', `<span class="pulse">Running full rigorous background check and analysis... This usually takes ~60 seconds to query all indices.</span>`);
+
+        const formData = new FormData();
+        formData.append('file', fileInputEl.files[0]);
+
+        try {
+            const res = await fetch('/api/analyze', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await res.json();
+
+            chatHistoryEl.removeChild(loadingMsg);
+
+            if (res.ok) {
+                // We should update the current session ID in case the dashboard generated a new context dict
+                currentSessionId = data.session_id;
+
+                let dashboardHTML = `
+                    <h3>📊 AI Dashboard Report</h3>
+                    <p><strong>Novelty Score:</strong> ${data.novelty_score}/10</p>
+                    <p><strong>Reproducibility Score:</strong> ${data.reproducibility_score}/10</p>
+                    <hr/>
+                    <h4>🧠 Summary</h4>
+                    <p>${data.summary}</p>
+                    <hr/>
+                    <h4>🔬 High-Level Insights</h4>
+                    <ul>
+                `;
+
+                if (data.insights && data.insights.length > 0) {
+                    data.insights.forEach(insight => {
+                        dashboardHTML += `<li><strong>${insight.type} (${insight.confidence * 100}% Confidence):</strong> ${insight.content}</li>`;
+                    });
+                } else {
+                    dashboardHTML += `<li>No major insights found.</li>`;
+                }
+                dashboardHTML += `</ul>`;
+
+                appendMessage('ai', dashboardHTML, "Dashboard Orchestrator");
+            } else {
+                appendMessage('system', `Error: ${data.detail || 'Analysis failed'}`);
+            }
+        } catch (err) {
+            chatHistoryEl.removeChild(loadingMsg);
+            appendMessage('system', `Analysis failed: ${err.message}`);
+        } finally {
+            chatInputEl.disabled = false;
+            analyzeBtnEl.disabled = false;
+            if(chatInputEl.value.trim().length > 0) sendBtnEl.disabled = false;
+        }
+    }
+
+    function showUploadNotification(message) {
+        if (!uploadNotifEl) return;
+        uploadNotifEl.innerHTML = `<button class="close-notif" onclick="hideUploadNotification()" aria-label="Dismiss">&times;</button>` + message;
+        uploadNotifEl.style.display = 'block';
+    }
+
+    function hideUploadNotification() {
+        if (!uploadNotifEl) return;
+        uploadNotifEl.style.display = 'none';
+    }
+
+    fileInputEl.addEventListener('change', hideUploadNotification); // reset when selecting a new file
 </script>
 </body>
 </html>
