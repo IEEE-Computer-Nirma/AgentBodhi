@@ -21,4 +21,3 @@ def extract_json(text: str) -> str:
 
     raise ValueError('No valid JSON found')
 
-
