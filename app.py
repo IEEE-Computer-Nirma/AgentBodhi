@@ -30,7 +30,6 @@ def read_root():
 
 @app.get("/api/agents")
 def get_agents():
-    # Return a dynamic list of agents
     return [
         {"slug": "methodology", "label": "Methodology Reviewer", "description": "Interrogate the experimental design and statistical rigor."},
         {"slug": "citations", "label": "Citation Auditor", "description": "Verify references and spot missing prior work."},
