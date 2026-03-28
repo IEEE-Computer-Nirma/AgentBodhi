@@ -49,7 +49,7 @@ class ResearchOrchestrator:
         self.methodology_agent = MethodologyAgent(self.client, self.model)
         self.sota_agent = SOTAAgent(self.client, self.model, self.tavily)
         self.novelty_agent = NoveltyAgent(self.client, self.model, self.tavily)
-        self.glossary_agent = GlossaryAgent(self.client, self.model)
+        self.glossary_agent = GlossaryAgent(self.client, self.model, self.tavily)
         self.related_work_agent = RelatedWorkAgent(self.client, self.model, self.tavily)
         self.conference_agent = ConferenceAgent(self.client, self.model, self.tavily)
 
