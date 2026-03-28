@@ -5,8 +5,8 @@ A FastAPI + plain HTML/JS research co-pilot! Upload a PDF inside a chat GUI and 
 ## Core Features
 
 - **FastAPI Engine**: Powered by Uvicorn, replacing the cumbersome Streamlit flow.
-- **Dynamic & Parallel Chat Agents**: Multiselect your preferred agents. All selected bots process your query and relevant paper context at the same time.
-- **True Agentic AI (Marionette Search)**: Features autonomous agents like the **Conference Matchmaker**, which intelligently generates search queries, browses the live web via Tavily, and streams a live "Agent Activity Log" of its thoughts and actions before evaluating your paper against real-world Call for Papers (CFP) requirements.
+- **Unified ReAct Orchestrator Plan-and-Execute Framework**: Select multiple expert agent personas. Instead of disconnected dummy outputs, the central ReAct Orchestrator creates an execution plan, performs necessary external searches (such as Glossary definitions and Conference requirements) dynamically using Selenium + DuckDuckGo, and synthesizes one coherent, collaborative response.
+- **True Agentic AI Grounding**: Implemented real tool usage. No more "marionette" prompts masquerading as actions—Agent Bodhi uses headless Chromium and Beautiful Soup to fetch real web results to ensure accurate conference submissions with actual CFP verification.
 - **HTML/CSS/JS Frontend**: Clean, responsive layout that feels like a native chat application.
 - **No API Hurdles in UI**: Configuration implicitly loaded from `config.py`.
 
@@ -19,7 +19,7 @@ A FastAPI + plain HTML/JS research co-pilot! Upload a PDF inside a chat GUI and 
    ```
 2. Install dependencies.
    ```powershell
-   pip install fastapi uvicorn python-multipart google-generativeai tavily arxiv
+   pip install fastapi uvicorn python-multipart google-generativeai tavily-python arxiv selenium beautifulsoup4 webdriver-manager
    ```
 3. Ensure `config.py` has valid API credentials for `GEMINI_API_KEY` and `TAVILY_API_KEY`.
 4. Run the server.

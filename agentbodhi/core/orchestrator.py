@@ -2,12 +2,16 @@ import hashlib
 import json
 import logging
 import re
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
+from bs4 import BeautifulSoup
 from google import genai
 from google.genai import types
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from tavily import TavilyClient
 
 from ..agents.citation import CitationAgent
@@ -17,6 +21,7 @@ from ..agents.novelty import NoveltyAgent
 from ..agents.related_work import RelatedWorkAgent
 from ..agents.sota import SOTAAgent
 from .models import AnalysisReport, Insight
+from .utils import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -247,76 +252,64 @@ Return ONLY the JSON."""
         if not context.get("full_text"):
             raise ValueError("No paper context available. Upload a PDF first.")
 
-        responses = {}
-        # We process each agent's response
-        for slug in agent_slugs:
-            if slug == "conference":
-                # Marionette-style search implementation
-                logs = ["🔍 **Agent Action:** Initializing Conference Matchmaker...", "🕸️ **Agent Action:** Analyzing paper abstract to determine research area..."]
-                
-                # Determine search query
-                query_prompt = f"Based on this paper summary, generate a short 3-5 word google search query to find relevant upcoming academic AI/CS conferences specifically with active 'Call for Papers' or 'CFP' (e.g. 'upcoming LLM conferences CFP 2026').\nSummary: {context['summary'][:1000]}"
-                query_resp = self.client.models.generate_content(model=self.model, contents=query_prompt).text.strip().replace('"', '')
-                
-                logs.append(f"🌐 **Agent Action:** Searching Web via Tavily for: `{query_resp}`...")
-                try:
-                    search_results = self.tavily.search(query=query_resp, search_depth="advanced", max_results=3)
-                    context_str = "\n\n".join([f"Source: {res['url']}\nContent: {res['content']}" for res in search_results.get('results', [])])
-                    logs.append(f"✅ **Agent Action:** Found {len(search_results.get('results', []))} relevant conference pages.")
-                except Exception as e:
-                    logs.append(f"⚠️ **Agent Action:** Web search failed ({str(e)}). Falling back to internal knowledge.")
-                    context_str = "No external results available."
+        selected_roles = [self.CHAT_AGENT_GUIDANCE.get(s, "") for s in agent_slugs]
+        
+        # Step 1: Generate a Plan using LLM 
+        plan_prompt = f"""You are the Master Orchestrator Agent. 
+You need to fulfill this user instruction: "{instruction}"
+Relevant Paper Summary: {context['summary'][:1000]}
+You have the following expert roles available: {agent_slugs}
 
-                logs.append("🧠 **Agent Action:** Evaluating paper against conference Call for Papers (CFP)...")
-                
-                primer = self.CHAT_AGENT_GUIDANCE["conference"]
-                prompt = f"{primer}\n\nSearch Results for Conferences:\n{context_str}\n\nPaper summary:\n{context['summary']}\n\nResearcher instruction:\n{instruction}\n\nRespond in Markdown. Include a section at the top titled 'Agent Activity Log' where you list the steps taken."
-                
-                final_resp = self.client.models.generate_content(model=self.model, contents=prompt).text.strip()
-                
-                # Prepend the live logs so the user sees the "marionette" effect
-                formatted_logs = "\n".join(logs)
-                responses[slug] = f"### 🕵️‍♂️ Agent Live Log\n{formatted_logs}\n\n---\n\n{final_resp}"
-                continue
+Decide on 1 to 3 search queries needed to gather external information (like conference CFPs, or glossary definitions, or related papers) before writing the final response. 
+If no search is needed, return an empty list for queries.
 
-            if slug == "glossary":
-                # Marionette-style Glossary Search
-                logs = ["🔍 **Agent Action:** Scanning text for complex jargon...", "🕸️ **Agent Action:** Identifying specific terms requiring clear definitions..."]
-                
-                # Determine terms to look up
-                terms_prompt = f"Identify 2-3 highly technical or obscure terms from this paper summary that need external plain-language definitions.\nSummary: {context['summary'][:1000]}\n\nReturn EXACTLY a comma-separated list of 2-3 terms (e.g. 'LoRA, cross-entropy loss'). Do not include any other text."
-                terms_resp = self.client.models.generate_content(model=self.model, contents=terms_prompt).text.strip()
-                
-                logs.append(f"🌐 **Agent Action:** Searching Web via Tavily definitions for: `{terms_resp}`...")
-                try:
-                    search_results = self.tavily.search(query=f"define {terms_resp} machine learning simple explanation", search_depth="basic", max_results=2)
-                    context_str = "\n\n".join([f"Source: {res['url']}\nContent: {res['content']}" for res in search_results.get('results', [])])
-                    logs.append(f"✅ **Agent Action:** Found real-world plain-language explanations from {len(search_results.get('results', []))} sources.")
-                except Exception as e:
-                    logs.append(f"⚠️ **Agent Action:** Web search failed ({str(e)}). Relying on internal knowledge.")
-                    context_str = "No external results available."
+Return ONLY valid JSON in this format:
+{{
+    "plan_steps": ["step 1 description", "step 2 description"],
+    "search_queries": ["query 1", "query 2"]
+}}
+"""
+        plan_resp = self.client.models.generate_content(model=self.model, contents=plan_prompt).text
+        plan_json = {}
+        try:
+            json_str = extract_json(plan_resp)
+            plan_json = json.loads(json_str)
+        except Exception:
+            plan_json = {"plan_steps": ["Analyze paper text"], "search_queries": []}
 
-                logs.append("🧠 **Agent Action:** Synthesizing final accessible glossary...")
-                
-                primer = self.CHAT_AGENT_GUIDANCE["glossary"]
-                prompt = f"{primer}\n\nWeb Search Results for Terms:\n{context_str}\n\nPaper summary:\n{context['summary']}\n\nResearcher instruction:\n{instruction}\n\nRespond in Markdown. Include a section at the top titled 'Agent Activity Log' where you list the steps taken. Clearly explain the terms from the search results to the real world."
-                
-                final_resp = self.client.models.generate_content(model=self.model, contents=prompt).text.strip()
-                
-                formatted_logs = "\n".join(logs)
-                responses[slug] = f"### 🕵️‍♂️ Agent Live Log\n{formatted_logs}\n\n---\n\n{final_resp}"
-                continue
+        logs = ["### 🕵️‍♂️ Agent Live Log"]
+        logs.append("📝 **Agent Action:** Formulating execution plan...")
+        for step in plan_json.get("plan_steps", []):
+            logs.append(f"  - {step}")
 
-            primer = self.CHAT_AGENT_GUIDANCE.get(slug, "You are a helpful research agent.")
-            prompt = f"{primer}\n\nPaper summary:\n{context['summary']}\n\nRelevant paper excerpt:\n{str(context['full_text'])[:8000]}\n\nResearcher instruction:\n{instruction}\n\nRespond in Markdown with concise bullet points."
+        # Step 2: Execute Search tools (Selenium/DuckDuckGo)
+        search_results = ""
+        for query in plan_json.get("search_queries", []):
+            logs.append(f"🌐 **Agent Action:** Searching Web via Selenium for: `{query}`...")
+            res = self._selenium_google_search(query)
+            search_results += f"Search Query: {query}\nResults:\n{res}\n\n"
+            logs.append(f"✅ **Agent Action:** Retrieved search results for `{query}`")
 
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt
-            )
-            responses[slug] = response.text.strip()
+        logs.append("🧠 **Agent Action:** Synthesizing final unified collaborative report...")
 
-        return responses
+        # Step 3: Final Synthesis
+        synthesis_prompt = f"""You are the unified Master Agent synthesizing a response based on multiple expert perspectives.
+You are embodying these roles: {selected_roles}
+
+User Instruction: {instruction}
+
+Paper Summary:
+{context['summary']}
+
+Web Search Results:
+{search_results if search_results else "No external search was performed."}
+
+Synthesize a single, highly cohesive, comprehensive response. Do not separate by agent. Write one unified professional report. Markdown format.
+"""
+        final_resp = self.client.models.generate_content(model=self.model, contents=synthesis_prompt).text.strip()
+        
+        formatted_logs = "\n".join(logs)
+        return {"Synthesized Report": f"{formatted_logs}\n\n---\n\n{final_resp}"}
 
     def chat_with_agent(self, agent_slug: str, instruction: str, usage_hint: str) -> str:
         context = self.get_context_snapshot()
@@ -331,3 +324,29 @@ Return ONLY the JSON."""
             contents=prompt
         )
         return response.text.strip()
+
+    def _selenium_google_search(self, query: str, num_results: int = 3) -> str:
+        try:
+            options = Options()
+            options.add_argument('--headless')
+            options.add_argument('--disable-gpu')
+            options.add_argument('--no-sandbox')
+            driver = webdriver.Chrome(options=options)
+            
+            # Using DuckDuckGo html as it's easier to parse without JS than Google
+            url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+            driver.get(url)
+            html = driver.page_source
+            driver.quit()
+            
+            soup = BeautifulSoup(html, 'html.parser')
+            results = []
+            for a in soup.find_all('a', class_='result__snippet', limit=num_results):
+                results.append(a.text.strip())
+                
+            if not results:
+                return "No obvious results found or blocked by search engine."
+                
+            return "\n".join([f"- {r}" for r in results])
+        except Exception as e:
+            return f"Search error: {str(e)}"
